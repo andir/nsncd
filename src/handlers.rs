@@ -23,7 +23,7 @@ use std::os::unix::ffi::OsStrExt;
 use anyhow::{bail, Context, Result};
 use atoi::atoi;
 use dns_lookup::{getaddrinfo, getnameinfo, AddrInfoHints};
-use nix::libc::{AF_INET6, NI_NUMERICSERV, SOCK_STREAM};
+use nix::libc::{AF_INET, AF_INET6, NI_NUMERICSERV, SOCK_STREAM};
 use nix::sys::socket::AddressFamily;
 use nix::unistd::{getgrouplist, Gid, Group, Uid, User};
 use slog::{debug, error, Logger};
@@ -197,23 +197,23 @@ pub fn handle_request(log: &Logger, request: &protocol::Request) -> Result<Vec<u
             let hostname = CStr::from_bytes_with_nul(request.key)?.to_str()?;
             let hints = AddrInfoHints {
                 socktype: SOCK_STREAM,
+                address: AF_INET,
                 ..AddrInfoHints::default()
             };
 
-            let host = match getaddrinfo(Some(hostname), None, Some(hints)) {
-                Ok(addrs) => {
-                    let addresses: std::io::Result<Vec<_>> = addrs
-                        .filter(|x| match x {
-                            Err(_) => false,
-                            Ok(addr) => addr.sockaddr.is_ipv4(),
-                        })
-                        .map(|r| r.map(|a| a.sockaddr.ip()))
-                        .collect();
-                    Ok(Some(Host {
-                        addresses: addresses?,
-                        hostname: hostname.to_string(),
-                    }))
-                }
+            let host = match getaddrinfo(Some(hostname), None, Some(hints)).map(|addrs| {
+                addrs
+                    .filter_map(|r| r.ok())
+                    .filter(|r| r.sockaddr.is_ipv4())
+                    .map(|a| a.sockaddr.ip())
+                    .collect::<Vec<_>>()
+            }) {
+                // no matches found
+                Ok(addresses) if addresses.len() == 0 => Ok(None),
+                Ok(addresses) => Ok(Some(Host {
+                    addresses,
+                    hostname: hostname.to_string(),
+                })),
                 Err(e) => match e.kind() {
                     dns_lookup::LookupErrorKind::NoName => Ok(None),
                     _ => bail!("error during lookup: {:?}", e),
